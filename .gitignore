@@ -1,0 +1,4 @@
+/bin/
+/vendor/
+*.exe
+*.log
