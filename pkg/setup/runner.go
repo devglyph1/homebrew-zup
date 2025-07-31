@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -50,14 +51,29 @@ type FixResponse struct {
 
 // RunCmd is the main Cobra command for running the setup. It loads the YAML configuration and executes all setup steps defined in zup.yaml.
 var configPathFlag string
+var zupServiceName string
+
+func getBaseDirectory() string {
+	fullPath, err := os.Getwd()
+	if err == nil {
+		return filepath.Base(fullPath)
+	}
+	return ""
+}
 
 var RunCmd = &cobra.Command{
 	Use:   "run",
 	Short: "Run setup steps defined in zup.yaml",
 	Run: func(cmd *cobra.Command, args []string) {
-		configPath := configPathFlag
-		if configPath == "" {
-			configPath = "zup.yaml"
+		configPath := "zup.yaml"
+		if configPathFlag != "" {
+			configPath = configPathFlag
+		}
+		if zupServiceName != "" {
+			configPath = getGlobalConfigPathForZupService(zupServiceName)
+		}
+		if configPathFlag == "auto" {
+			configPath = getGlobalConfigPathForZupService(getBaseDirectory())
 		}
 		runSetup(configPath)
 	},
@@ -65,6 +81,7 @@ var RunCmd = &cobra.Command{
 
 func init() {
 	RunCmd.Flags().StringVar(&configPathFlag, "path", "", "Path to the config file (default: zup.yaml)")
+	RunCmd.Flags().StringVarP(&zupServiceName, "service", "svc", "", "Specify the service name to run")
 }
 
 // SetOpenAIKeyCmd is a Cobra command to set/update the OpenAI API key globally for the user.
@@ -154,6 +171,10 @@ func getGlobalConfigDir() string {
 
 func getGlobalConfigPath() string {
 	return getGlobalConfigDir() + "/config.yaml"
+}
+
+func getGlobalConfigPathForZupService(serviceName string) string {
+	return getGlobalConfigPath() + "/" + serviceName + ".yaml"
 }
 
 /*
