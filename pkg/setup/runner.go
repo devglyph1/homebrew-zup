@@ -81,7 +81,7 @@ var RunCmd = &cobra.Command{
 
 func init() {
 	RunCmd.Flags().StringVar(&configPathFlag, "path", "", "Path to the config file (default: zup.yaml)")
-	RunCmd.Flags().StringVarP(&zupServiceName, "service", "svc", "", "Specify the service name to run")
+	RunCmd.Flags().StringVarP(&zupServiceName, "service", "s", "", "Specify the service name to run")
 }
 
 // SetOpenAIKeyCmd is a Cobra command to set/update the OpenAI API key globally for the user.
