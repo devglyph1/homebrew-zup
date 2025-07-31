@@ -174,7 +174,7 @@ func getGlobalConfigPath() string {
 }
 
 func getGlobalConfigPathForZupService(serviceName string) string {
-	return getGlobalConfigPath() + "/" + serviceName + ".yaml"
+	return getGlobalConfigDir() + "/" + serviceName + ".yaml"
 }
 
 /*
