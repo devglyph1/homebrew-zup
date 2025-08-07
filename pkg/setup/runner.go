@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 
@@ -93,6 +94,74 @@ var SetOpenAIKeyCmd = &cobra.Command{
 	},
 }
 
+// --- Global Configuration Management ---
+
+/*
+loadGlobalConfig reads the global ~/.zup/config.yaml file into a map.
+This function serves as a centralized way to access all stored user settings, including API keys and custom variables. It gracefully handles cases where the config file doesn't exist by returning an empty map, allowing the application to proceed without errors.
+*/
+func loadGlobalConfig() (map[string]string, error) {
+	configPath := getGlobalConfigPath()
+	config := make(map[string]string)
+
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return config, nil // Return empty map if file doesn't exist
+		}
+		return nil, err // Return other errors
+	}
+
+	if err := yaml.Unmarshal(data, &config); err != nil {
+		return nil, err
+	}
+	return config, nil
+}
+
+/*
+saveGlobalConfig saves a map to the global ~/.zup/config.yaml file.
+It ensures the configuration directory exists and then marshals the provided map into YAML format, overwriting the existing configuration file. This allows for persistent storage of any key-value setting.
+*/
+func saveGlobalConfig(config map[string]string) error {
+	configDir := getGlobalConfigDir()
+	if err := os.MkdirAll(configDir, 0700); err != nil {
+		return fmt.Errorf("failed to create config directory: %w", err)
+	}
+
+	data, err := yaml.Marshal(&config)
+	if err != nil {
+		return fmt.Errorf("failed to marshal config: %w", err)
+	}
+
+	configPath := getGlobalConfigPath()
+	return os.WriteFile(configPath, data, 0600)
+}
+
+/*
+storeGlobalConfigValue adds or updates a key-value pair in the global config.
+It reads the current configuration, updates the specified key with the new value, and saves the configuration back to disk. This is the primary method for persisting user-defined variables and settings.
+*/
+func storeGlobalConfigValue(key, value string) error {
+	config, err := loadGlobalConfig()
+	if err != nil {
+		return fmt.Errorf("failed to load global config: %w", err)
+	}
+	config[key] = value
+	return saveGlobalConfig(config)
+}
+
+/*
+getGlobalConfigValue retrieves a value for a given key from the global config.
+It returns an empty string if the key is not found or if the configuration file cannot be read, providing a safe way to access stored values.
+*/
+func getGlobalConfigValue(key string) string {
+	config, err := loadGlobalConfig()
+	if err != nil {
+		return ""
+	}
+	return config[key]
+}
+
 // getOpenAIKey loads the OpenAI API key from env or global config (~/.zup/config.yaml). Returns empty string if not found.
 func getOpenAIKey() string {
 	// 1. Check env
@@ -101,23 +170,16 @@ func getOpenAIKey() string {
 		return key
 	}
 	// 2. Check global config
-	globalConfigPath := getGlobalConfigPath()
-	if data, err := os.ReadFile(globalConfigPath); err == nil {
-		type config struct {
-			OpenAIToken string `yaml:"openai_api_token"`
-		}
-		var cfg config
-		if err := yaml.Unmarshal(data, &cfg); err == nil && cfg.OpenAIToken != "" {
-			return cfg.OpenAIToken
-		}
+	key = getGlobalConfigValue("openai_api_token")
+	if key != "" {
+		return key
 	}
 	// 3. Check local config (for backward compatibility)
 	localConfigPath := ".zup/config.yaml"
 	if data, err := os.ReadFile(localConfigPath); err == nil {
-		type config struct {
+		var cfg struct {
 			OpenAIToken string `yaml:"openai_api_token"`
 		}
-		var cfg config
 		if err := yaml.Unmarshal(data, &cfg); err == nil && cfg.OpenAIToken != "" {
 			return cfg.OpenAIToken
 		}
@@ -144,21 +206,7 @@ func setAndStoreOpenAIKeyInteractive() {
 
 // storeOpenAIKey writes the OpenAI API key to ~/.zup/config.yaml
 func storeOpenAIKey(key string) error {
-	// Always store in global config
-	configDir := getGlobalConfigDir()
-	if err := os.MkdirAll(configDir, 0700); err != nil {
-		return err
-	}
-	configPath := getGlobalConfigPath()
-	type config struct {
-		OpenAIToken string `yaml:"openai_api_token"`
-	}
-	cfg := config{OpenAIToken: key}
-	out, err := yaml.Marshal(&cfg)
-	if err != nil {
-		return err
-	}
-	return os.WriteFile(configPath, out, 0600)
+	return storeGlobalConfigValue("openai_api_token", key)
 }
 
 func getGlobalConfigDir() string {
@@ -166,20 +214,63 @@ func getGlobalConfigDir() string {
 	if err != nil {
 		return ".zup" // fallback
 	}
-	return home + "/.zup"
+	return filepath.Join(home, ".zup")
 }
 
 func getGlobalConfigPath() string {
-	return getGlobalConfigDir() + "/config.yaml"
+	return filepath.Join(getGlobalConfigDir(), "config.yaml")
 }
 
 func getGlobalConfigPathForZupService(serviceName string) string {
-	return getGlobalConfigDir() + "/" + serviceName + ".yaml"
+	return filepath.Join(getGlobalConfigDir(), serviceName+".yaml")
+}
+
+/*
+resolveCommandVariables finds variables like ${VAR_NAME} in a command string.
+For each unique variable found, it checks the global configuration for a stored value. If no value is found, it prompts the user for input and saves the provided value for future runs. Finally, it returns the command string with all variable placeholders replaced by their corresponding values.
+*/
+func resolveCommandVariables(command string) (string, error) {
+	re := regexp.MustCompile(`\$\{(.*?)\}`)
+	matches := re.FindAllStringSubmatch(command, -1)
+	resolvedCommand := command
+	uniqueVars := make(map[string]bool)
+
+	for _, match := range matches {
+		if len(match) < 2 {
+			continue
+		}
+		varName := match[1]
+		placeholder := match[0] // The full ${VAR_NAME} string
+
+		if _, seen := uniqueVars[varName]; seen {
+			continue
+		}
+		uniqueVars[varName] = true
+
+		value := getGlobalConfigValue(varName)
+		if value == "" {
+			magentaBold := color.New(color.FgHiMagenta, color.Bold)
+			magentaBold.Printf("Please enter a value for the variable '%s': ", varName)
+
+			scanner := bufio.NewScanner(os.Stdin)
+			scanner.Scan()
+			inputValue := strings.TrimSpace(scanner.Text())
+
+			if inputValue == "" {
+				return "", fmt.Errorf("no value provided for required variable '%s'", varName)
+			}
+			if err := storeGlobalConfigValue(varName, inputValue); err != nil {
+				color.New(color.FgRed, color.Bold).Printf("Warning: Failed to store variable '%s' globally: %v\n", varName, err)
+			}
+			value = inputValue
+		}
+		resolvedCommand = strings.ReplaceAll(resolvedCommand, placeholder, value)
+	}
+	return resolvedCommand, nil
 }
 
 /*
 runSetup is the entry point for executing the setup process as defined in the YAML configuration file (zup.yaml).
-
 This function attempts to load the configuration file, parse its contents into a Config struct, and then iterates over each setup step defined in the file. For each step, it delegates execution to the executeStep function, which handles command execution and error recovery. If the configuration file cannot be loaded or parsed, an error message is printed and the setup process is aborted.
 */
 func runSetup(configPath string) {
@@ -211,19 +302,26 @@ func loadConfig(path string) (*Config, error) {
 
 /*
 executeStep is responsible for running a single setup step as defined in the configuration.
-It prints the step's description and command to the terminal for user visibility. The function then attempts to execute the command using fixAndRunCommandWithMeta, which handles both normal execution and error recovery. If the command fails and cannot be fixed, an error message is displayed. This function ensures that each step is clearly communicated to the user and that failures are handled gracefully.
+It first resolves any variables (e.g., ${VAR_NAME}) in the command string, prompting the user for input if necessary. It then prints the step's description and the resolved command to the terminal. Finally, it executes the command using fixAndRunCommandWithMeta, which handles both normal execution and error recovery.
 */
 func executeStep(step Step) {
 	mode := step.Mode
 	if mode == "" {
 		mode = "same-terminal"
 	}
+
+	resolvedCmd, err := resolveCommandVariables(step.Cmd)
+	if err != nil {
+		color.New(color.FgRed, color.Bold).Printf("\n❌ Failed to resolve variables: %v\n", err)
+		return
+	}
+
 	cyan := color.New(color.FgCyan, color.Bold).SprintFunc()
 	fmt.Printf("\n%s %s\n%s %s\n",
 		cyan("🔧 Step:"), step.Desc,
-		cyan("Command:"), step.Cmd,
+		cyan("Command:"), resolvedCmd,
 	)
-	if err := fixAndRunCommandWithMeta(step.Cmd, step.Meta, mode); err != nil {
+	if err := fixAndRunCommandWithMeta(resolvedCmd, step.Meta, mode); err != nil {
 		color.New(color.FgRed, color.Bold).Printf("\n❌ Command ultimately failed after all fixes: %v\n", err)
 	}
 }
@@ -315,19 +413,19 @@ func runCommand(command string, suppressOutput bool) error {
 	cmd := exec.Command("bash", "-c", command)
 	cmd.Stdin = os.Stdin
 	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
 	if !suppressOutput {
 		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
+	} else {
+		cmd.Stdout = &stdout
+		cmd.Stderr = &stderr
 	}
 	if err := cmd.Run(); err != nil {
 		if suppressOutput {
 			return errors.New(strings.TrimSpace(stdout.String() + "\n" + stderr.String()))
 		}
-		return errors.New(stderr.String())
-	}
-	if !suppressOutput && stdout.Len() > 0 {
-		fmt.Print(stdout.String())
+		// When not suppressing output, stderr is already printed. Return a generic error.
+		return errors.New("command failed")
 	}
 	return nil
 }
