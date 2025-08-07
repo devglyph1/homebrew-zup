@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"os"
 	"runtime"
 	"time"
 
@@ -29,12 +28,12 @@ function calling (tool use) interface, and expects a structured JSON response wi
 The use of OpenAI's ToolChoiceFunction ensures reliable and valid JSON output.
 */
 
-func getFixFromOpenAIWithMeta(command, errorMsg, meta string) (string, string) {
+func getFixFromOpenAIWithMeta(command, errorMsg, meta, openaiKey string) (string, string) {
 	s := spinner.New(spinner.CharSets[14], 100*time.Millisecond)
 	s.Suffix = " 🧠 Thinking for a fix..."
 	s.Start()
 
-	apiKey := os.Getenv("OPENAI_API_KEY")
+	apiKey := openaiKey
 	if apiKey == "" {
 		return "", "Missing OPENAI_API_KEY"
 	}
