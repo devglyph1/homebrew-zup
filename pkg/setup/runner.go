@@ -100,9 +100,9 @@ var SetOpenAIKeyCmd = &cobra.Command{
 loadGlobalConfig reads the global ~/.zup/config.yaml file into a map.
 This function serves as a centralized way to access all stored user settings, including API keys and custom variables. It gracefully handles cases where the config file doesn't exist by returning an empty map, allowing the application to proceed without errors.
 */
-func loadGlobalConfig() (map[string]string, error) {
+func loadGlobalConfig() (map[string]interface{}, error) {
 	configPath := getGlobalConfigPath()
-	config := make(map[string]string)
+	config := make(map[string]interface{})
 
 	data, err := os.ReadFile(configPath)
 	if err != nil {
@@ -122,7 +122,7 @@ func loadGlobalConfig() (map[string]string, error) {
 saveGlobalConfig saves a map to the global ~/.zup/config.yaml file.
 It ensures the configuration directory exists and then marshals the provided map into YAML format, overwriting the existing configuration file. This allows for persistent storage of any key-value setting.
 */
-func saveGlobalConfig(config map[string]string) error {
+func saveGlobalConfig(config map[string]interface{}) error {
 	configDir := getGlobalConfigDir()
 	if err := os.MkdirAll(configDir, 0700); err != nil {
 		return fmt.Errorf("failed to create config directory: %w", err)
@@ -141,7 +141,7 @@ func saveGlobalConfig(config map[string]string) error {
 storeGlobalConfigValue adds or updates a key-value pair in the global config.
 It reads the current configuration, updates the specified key with the new value, and saves the configuration back to disk. This is the primary method for persisting user-defined variables and settings.
 */
-func storeGlobalConfigValue(key, value string) error {
+func storeGlobalConfigValue(key string, value interface{}) error {
 	config, err := loadGlobalConfig()
 	if err != nil {
 		return fmt.Errorf("failed to load global config: %w", err)
@@ -159,7 +159,10 @@ func getGlobalConfigValue(key string) string {
 	if err != nil {
 		return ""
 	}
-	return config[key]
+	if val, ok := config[key].(string); ok {
+		return val
+	}
+	return ""
 }
 
 // getOpenAIKey loads the OpenAI API key from env or global config (~/.zup/config.yaml). Returns empty string if not found.
@@ -227,42 +230,49 @@ func getGlobalConfigPathForZupService(serviceName string) string {
 
 /*
 resolveCommandVariables finds variables like ${VAR_NAME} in a command string.
-For each unique variable found, it checks the global configuration for a stored value. If no value is found, it prompts the user for input and saves the provided value for future runs. Finally, it returns the command string with all variable placeholders replaced by their corresponding values.
+For each unique variable found, it checks the global configuration for a stored value. If no value is found, it prompts the user for input. It now accepts empty strings as valid input and saves them to prevent re-prompting. Finally, it returns the command string with all variable placeholders replaced by their corresponding values.
 */
 func resolveCommandVariables(command string) (string, error) {
 	re := regexp.MustCompile(`\$\{(.*?)\}`)
 	matches := re.FindAllStringSubmatch(command, -1)
 	resolvedCommand := command
 	uniqueVars := make(map[string]bool)
+	config, err := loadGlobalConfig()
+	if err != nil {
+		return "", fmt.Errorf("could not load global config: %w", err)
+	}
 
 	for _, match := range matches {
 		if len(match) < 2 {
 			continue
 		}
 		varName := match[1]
-		placeholder := match[0] // The full ${VAR_NAME} string
+		placeholder := match[0]
 
 		if _, seen := uniqueVars[varName]; seen {
 			continue
 		}
 		uniqueVars[varName] = true
 
-		value := getGlobalConfigValue(varName)
-		if value == "" {
+		var value string
+		if storedValue, exists := config[varName]; exists {
+			value = fmt.Sprintf("%v", storedValue)
+		} else {
+			// Variable not found, prompt the user.
 			magentaBold := color.New(color.FgHiMagenta, color.Bold)
-			magentaBold.Printf("Please enter a value for the variable '%s': ", varName)
+			magentaBold.Printf("Please enter a value for '%s': ", varName)
 
 			scanner := bufio.NewScanner(os.Stdin)
 			scanner.Scan()
 			inputValue := strings.TrimSpace(scanner.Text())
 
-			if inputValue == "" {
-				return "", fmt.Errorf("no value provided for required variable '%s'", varName)
-			}
+			// Store the value (even if empty) to avoid asking again.
 			if err := storeGlobalConfigValue(varName, inputValue); err != nil {
 				color.New(color.FgRed, color.Bold).Printf("Warning: Failed to store variable '%s' globally: %v\n", varName, err)
 			}
 			value = inputValue
+			// Update the in-memory config for the current run
+			config[varName] = inputValue
 		}
 		resolvedCommand = strings.ReplaceAll(resolvedCommand, placeholder, value)
 	}
@@ -413,19 +423,29 @@ func runCommand(command string, suppressOutput bool) error {
 	cmd := exec.Command("bash", "-c", command)
 	cmd.Stdin = os.Stdin
 	var stdout, stderr bytes.Buffer
-	if !suppressOutput {
-		cmd.Stdout = os.Stdout
-		cmd.Stderr = os.Stderr
-	} else {
+	cmd.Stderr = &stderr
+
+	if suppressOutput {
 		cmd.Stdout = &stdout
-		cmd.Stderr = &stderr
+	} else {
+		cmd.Stdout = os.Stdout
 	}
+
 	if err := cmd.Run(); err != nil {
-		if suppressOutput {
-			return errors.New(strings.TrimSpace(stdout.String() + "\n" + stderr.String()))
+		// The error from cmd.Run() is often just "exit status X".
+		// The actual error message is in stderr, which is more useful.
+		errMsg := strings.TrimSpace(stderr.String())
+		if !suppressOutput && errMsg != "" {
+			// If not suppressing, the user hasn't seen the error yet because we captured it.
+			// So, print it now before returning.
+			fmt.Fprintln(os.Stderr, errMsg)
 		}
-		// When not suppressing output, stderr is already printed. Return a generic error.
-		return errors.New("command failed")
+
+		if errMsg != "" {
+			return errors.New(errMsg)
+		}
+		// Fallback to the original error if stderr is empty
+		return err
 	}
 	return nil
 }
