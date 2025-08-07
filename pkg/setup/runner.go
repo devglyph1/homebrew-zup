@@ -358,7 +358,7 @@ func fixAndRunCommandWithMeta(command, meta, mode string) error {
 			return err
 		}
 	}
-	fix, explanation := getFixFromOpenAIWithMeta(command, errMsg, meta)
+	fix, explanation := getFixFromOpenAIWithMeta(command, errMsg, meta, openaiKey)
 	color.New(color.FgYellow, color.Bold).Printf("\n💡 Suggested Fix: %s\n", fix)
 	color.New(color.FgHiBlack).Printf("📝 %s\n", explanation)
 	if askYesNo(color.New(color.FgGreen, color.Bold).Sprintf("Apply this fix?")) {
