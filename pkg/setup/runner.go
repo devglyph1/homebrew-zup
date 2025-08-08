@@ -289,6 +289,13 @@ func runSetup(configPath string) {
 		fmt.Println("Failed to load config file:", err)
 		return
 	}
+	// --- MODIFICATION START ---
+	// Clean up the environment state file at the very end of the run.
+	// We use defer to ensure it runs even if a step fails.
+	const envStateFile = ".zup_env"
+	defer os.Remove(envStateFile)
+	// --- MODIFICATION END ---
+
 	for _, step := range cfg.Setup {
 		executeStep(step)
 	}
@@ -420,7 +427,20 @@ runCommand executes a shell command using bash, with optional output suppression
 If suppressOutput is true, both stdout and stderr are captured and not printed to the terminal; otherwise, output is streamed directly to the terminal. The function returns an error if the command fails, including any captured output for debugging. This function provides a flexible way to run shell commands and handle their output as needed by the setup process.
 */
 func runCommand(command string, suppressOutput bool) error {
-	cmd := exec.Command("bash", "-c", command)
+	// --- MODIFICATION START ---
+	// The state file acts as the "memory" for environment variables between steps.
+	const envStateFile = ".zup_env"
+
+	// This wrapper command persists the shell environment between executions.
+	// 1. `source .zup_env`: Loads the environment from the previous step.
+	// 2. `%s`: Executes the user's actual command.
+	// 3. `export -p > .zup_env`: Saves the entire current environment (including any new changes)
+	//    by overwriting the state file, making it ready for the next step.
+	wrappedCmd := fmt.Sprintf("source %s 2>/dev/null; %s; export -p > %s", envStateFile, command, envStateFile)
+
+	cmd := exec.Command("bash", "-c", wrappedCmd)
+	// --- MODIFICATION END ---
+
 	cmd.Stdin = os.Stdin
 	var stdout, stderr bytes.Buffer
 	cmd.Stderr = &stderr
