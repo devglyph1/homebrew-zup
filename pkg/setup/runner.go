@@ -39,10 +39,14 @@ type Step struct {
 	Mode string `yaml:"mode,omitempty"`
 }
 
-// Config represents the overall YAML configuration.
+// --- MODIFICATION START ---
+// Updated Config struct to include a new 'Env' field for environment variables.
 type Config struct {
-	Setup []Step `yaml:"setup"`
+	Env   map[string]string `yaml:"env,omitempty"`
+	Setup []Step            `yaml:"setup"`
 }
+
+// --- MODIFICATION END ---
 
 // FixResponse represents the structure of a fix suggestion from OpenAI.
 type FixResponse struct {
@@ -279,27 +283,71 @@ func resolveCommandVariables(command string) (string, error) {
 	return resolvedCommand, nil
 }
 
+// --- MODIFICATION START ---
+
+/*
+processEnvVariables reads the 'env' key from the zup.yaml config,
+creates or updates the zup.env file with these variables, and logs the process.
+*/
+func processEnvVariables(configPath string) error {
+	cfg, err := loadConfig(configPath)
+	if err != nil {
+		return err
+	}
+
+	if len(cfg.Env) == 0 {
+		color.New(color.FgYellow).Println("No environment variables found in zup.yaml.")
+		return nil
+	}
+
+	envFile, err := os.Create("zup.env")
+	if err != nil {
+		return fmt.Errorf("failed to create zup.env file: %w", err)
+	}
+	defer envFile.Close()
+
+	color.New(color.FgCyan, color.Bold).Println("\n⚙️  Processing environment variables from zup.yaml...")
+	writer := bufio.NewWriter(envFile)
+	for key, value := range cfg.Env {
+		envLine := fmt.Sprintf("export %s=\"%s\"\n", key, value)
+		_, err := writer.WriteString(envLine)
+		if err != nil {
+			return fmt.Errorf("failed to write to zup.env: %w", err)
+		}
+		color.New(color.FgGreen).Printf("✓ Exported %s=%s\n", key, value)
+	}
+
+	writer.Flush()
+	color.New(color.FgGreen, color.Bold).Println("✅ zup.env file created/updated.")
+	return nil
+}
+
 /*
 runSetup is the entry point for executing the setup process as defined in the YAML configuration file (zup.yaml).
 This function attempts to load the configuration file, parse its contents into a Config struct, and then iterates over each setup step defined in the file. For each step, it delegates execution to the executeStep function, which handles command execution and error recovery. If the configuration file cannot be loaded or parsed, an error message is printed and the setup process is aborted.
 */
 func runSetup(configPath string) {
+	// Process env variables from zup.yaml and create the zup.env file first.
+	if err := processEnvVariables(configPath); err != nil {
+		color.New(color.FgRed, color.Bold).Printf("❌ Failed to process environment variables: %v\n", err)
+		return
+	}
+
 	cfg, err := loadConfig(configPath)
 	if err != nil {
 		fmt.Println("Failed to load config file:", err)
 		return
 	}
-	// --- MODIFICATION START ---
-	// Clean up the environment state file at the very end of the run.
-	// We use defer to ensure it runs even if a step fails.
-	const envStateFile = ".zup_env"
-	defer os.Remove(envStateFile)
-	// --- MODIFICATION END ---
+
+	// Defer the cleanup of zup.env to ensure it runs even if a step fails.
+	defer os.Remove("zup.env")
 
 	for _, step := range cfg.Setup {
 		executeStep(step)
 	}
 }
+
+// --- MODIFICATION END ---
 
 /*
 loadConfig reads the YAML configuration from the specified file path and unmarshals it into a Config struct.
@@ -427,19 +475,17 @@ runCommand executes a shell command using bash, with optional output suppression
 If suppressOutput is true, both stdout and stderr are captured and not printed to the terminal; otherwise, output is streamed directly to the terminal. The function returns an error if the command fails, including any captured output for debugging. This function provides a flexible way to run shell commands and handle their output as needed by the setup process.
 */
 func runCommand(command string, suppressOutput bool) error {
-	// --- MODIFICATION START ---
-	// The state file acts as the "memory" for environment variables between steps.
-	const envStateFile = ".zup_env"
+	// The state file acts as the "memory" for environment variables between executions.
+	// It is created and populated by the `processEnvVariables` function.
+	const envFile = "zup.env"
 
-	// This wrapper command persists the shell environment between executions.
-	// 1. `source .zup_env`: Loads the environment from the previous step.
-	// 2. `%s`: Executes the user's actual command.
-	// 3. `export -p > .zup_env`: Saves the entire current environment (including any new changes)
-	//    by overwriting the state file, making it ready for the next step.
-	wrappedCmd := fmt.Sprintf("source %s 2>/dev/null; %s; export -p > %s", envStateFile, command, envStateFile)
+	// Construct the command to be run by bash.
+	// 1. `source zup.env`: This loads the environment variables from the file.
+	// 2. `%s`: This executes the actual command from the zup.yaml.
+	// `2>/dev/null` is used to suppress any "file not found" errors if zup.env doesn't exist.
+	wrappedCmd := fmt.Sprintf("source %s 2>/dev/null; %s", envFile, command)
 
 	cmd := exec.Command("bash", "-c", wrappedCmd)
-	// --- MODIFICATION END ---
 
 	cmd.Stdin = os.Stdin
 	var stdout, stderr bytes.Buffer
